@@ -29,22 +29,17 @@ func importBlock(w io.Writer, resource Resource, condition string) {
 	}
 }
 
-func removedString(from, index string) string {
+func removedString(from string) string {
 	return fmt.Sprintf("removed {\n"+
-		"  from = %s%s\n"+
+		"  from = %s\n"+
 		"  lifecycle {\n"+
 		"    destroy = false\n"+
 		"  }\n"+
-		"}", from, index)
+		"}", from)
 }
 
 func removedBlock(w io.Writer, resource Resource) {
-	for _, instance := range resource.Instances {
-		fmt.Fprintln(w, removedString(
-			resource.ID(),
-			instance.Index(),
-		))
+	fmt.Fprintln(w, removedString(resource.ID()))
 
-		fmt.Fprintln(w)
-	}
+	fmt.Fprintln(w)
 }
