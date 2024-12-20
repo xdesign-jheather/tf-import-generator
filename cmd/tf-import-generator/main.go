@@ -28,23 +28,24 @@ func main() {
 		resources := strings.Split(strings.TrimSpace(r.FormValue("resources")), "\r\n")
 
 		if len(resources) == 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		states, err := uploadedStateFiles(r, "statefiles")
+
+		if err != nil {
+			log.Println(err)
+		}
+
+		if err != nil || len(states) == 0 {
+			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 
 		var buf bytes.Buffer
 
-		for _, upload := range r.MultipartForm.File["statefiles"] {
-			f, err := upload.Open()
-
-			if err != nil {
-				log.Println(err)
-				continue
-			}
-
-			state := readState(f)
-
-			_ = f.Close()
-
+		for _, state := range states {
 			if state.Version != 4 {
 				continue
 			}
