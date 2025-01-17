@@ -1,11 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"embed"
 	"html/template"
 	"log"
 	"net/http"
+	"os"
+	"os/exec"
 	"strings"
 )
 
@@ -43,7 +44,12 @@ func main() {
 			return
 		}
 
-		var buf bytes.Buffer
+		f1, err := os.CreateTemp("", "tf-import-generator-*.tf")
+
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 
 		for _, state := range states {
 			if state.Version != 4 {
@@ -57,7 +63,7 @@ func main() {
 
 				for _, prefix := range resources {
 					if strings.HasPrefix(resource.ID(), prefix) {
-						importBlock(&buf, resource, r.FormValue("condition"))
+						importBlock(f1, resource, r.FormValue("condition"))
 					}
 				}
 			}
@@ -69,14 +75,35 @@ func main() {
 
 				for _, prefix := range resources {
 					if strings.HasPrefix(resource.ID(), prefix) {
-						removedBlock(&buf, resource)
+						removedBlock(f1, resource)
 					}
 				}
 			}
 		}
 
+		if err = f1.Close(); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		cmd := exec.Command("terraform", "fmt", f1.Name())
+
+		if err = cmd.Run(); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		f2, err := os.ReadFile(f1.Name())
+
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		_ = os.Remove(f1.Name())
+
 		tmpl.ExecuteTemplate(w, "process.html", map[string]interface{}{
-			"Output": buf.String(),
+			"Output": string(f2),
 		})
 	})
 
