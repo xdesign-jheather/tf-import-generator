@@ -1,12 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"embed"
+	"fmt"
 	"html/template"
 	"log"
 	"net/http"
-	"os"
-	"os/exec"
 	"strings"
 )
 
@@ -23,13 +23,7 @@ func main() {
 	http.HandleFunc("POST /process", func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseMultipartForm(10 << 20); err != nil {
 			log.Println(err)
-			return
-		}
-
-		resources := strings.Split(strings.TrimSpace(r.FormValue("resources")), "\r\n")
-
-		if len(resources) == 0 {
-			w.WriteHeader(http.StatusBadRequest)
+			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 
@@ -44,76 +38,119 @@ func main() {
 			return
 		}
 
-		f1, err := os.CreateTemp("", "tf-import-generator-*.tf")
+		condition := r.FormValue("condition")
 
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
+		check := func(address string) bool {
+			resources := strings.Split(strings.TrimSpace(r.FormValue("resources")), "\r\n")
+
+			if len(resources) == 0 {
+				return true
+			}
+
+			for _, prefix := range resources {
+				if strings.HasPrefix(address, prefix) {
+					return true
+				}
+			}
+			return false
 		}
 
-		for _, state := range states {
-			if state.Version != 4 {
+		var buf bytes.Buffer
+
+		// Only consider resources in common with all uploaded files.
+
+		for ri, resourceAddress := range states.CommonResources() {
+			// Reduce the list of resources further according to user preferences.
+
+			if !check(resourceAddress) {
 				continue
 			}
 
-			for _, resource := range state.Resources {
-				if resource.Mode != "managed" {
-					continue
-				}
+			_, _ = fmt.Fprintf(&buf, "# %s\n\n", resourceAddress)
 
-				for _, prefix := range resources {
-					if strings.HasPrefix(resource.ID(), prefix) {
-						importBlock(f1, resource, r.FormValue("condition"))
+			resources := states.MapResources(resourceAddress)
+
+			for _, refResource := range resources {
+
+				switch {
+				case refResource.Enumeration() == "native":
+					_, _ = fmt.Fprintf(&buf, "locals {\n")
+					_, _ = fmt.Fprintf(&buf, "  import_%d = {\n", ri+1)
+
+					for key, resource := range resources {
+						_, _ = fmt.Fprintf(&buf, `    "%s" = "%s"`+"\n", key, resource.Instances[0].Import(refResource.Type))
 					}
-				}
-			}
 
-			for _, resource := range state.Resources {
-				if resource.Mode != "managed" {
-					continue
-				}
+					_, _ = fmt.Fprintf(&buf, "  }\n")
+					_, _ = fmt.Fprintf(&buf, "}\n\n")
 
-				for _, prefix := range resources {
-					if strings.HasPrefix(resource.ID(), prefix) {
-						removedBlock(f1, resource)
+					_, _ = fmt.Fprintf(&buf, "import {\n")
+					_, _ = fmt.Fprintf(&buf, "  for_each = contains(keys(local.import_%d), %s) ? [1] : []\n", ri+1, condition)
+					_, _ = fmt.Fprintf(&buf, "  to       = %s\n", refResource.ID())
+					_, _ = fmt.Fprintf(&buf, "  id       = local.import_%d[%s]\n", ri+1, condition)
+					_, _ = fmt.Fprintf(&buf, "}\n\n")
+
+				case refResource.Enumeration() == "count", refResource.Enumeration() == "for_each":
+					index := make(Index)
+
+					for key, resource := range resources {
+						for _, instance := range resource.Instances {
+							index.Add(instance.Index(), key)
+						}
 					}
+
+					_, _ = fmt.Fprintf(&buf, "locals {\n")
+
+					index.Walk(func(ii int, index string, keys []string) {
+						_, _ = fmt.Fprintf(&buf, "  # %s%s\n\n", resourceAddress, index)
+						_, _ = fmt.Fprintf(&buf, "  import_%d_%d = {\n", ri+1, ii)
+
+						for _, key := range keys {
+							for _, instance := range resources[key].Instances {
+								if instance.Index() != index {
+									continue
+								}
+								_, _ = fmt.Fprintf(&buf, `    "%s" = "%s"`+"\n", key, instance.Import(refResource.Type))
+							}
+						}
+
+						_, _ = fmt.Fprintf(&buf, "  }\n\n")
+					})
+
+					_, _ = fmt.Fprintf(&buf, "}\n\n")
+
+					index.Walk(func(ii int, index string, keys []string) {
+						_, _ = fmt.Fprintf(&buf, "import {\n")
+						_, _ = fmt.Fprintf(&buf, "  for_each = contains(keys(local.import_%d_%d), %s) ? [1] : []\n", ri+1, ii, condition)
+						_, _ = fmt.Fprintf(&buf, "  to       = %s%s\n", refResource.ID(), index)
+						_, _ = fmt.Fprintf(&buf, "  id       = local.import_%d_%d[%s]\n", ri+1, ii, condition)
+						_, _ = fmt.Fprintf(&buf, "}\n\n")
+					})
 				}
+
+				break
 			}
+
 		}
 
-		if err = f1.Close(); err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		if tf, err := exec.LookPath("terraform"); err == nil {
-			cmd := exec.Command(tf, "fmt", f1.Name())
-
-			if err = cmd.Run(); err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-		}
-
-		f2, err := os.ReadFile(f1.Name())
+		output, err := format(&buf)
 
 		if err != nil {
+			log.Println(fmt.Errorf("terraform fmt error: %v", err))
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 
-		_ = os.Remove(f1.Name())
-
-		tmpl.ExecuteTemplate(w, "process.html", map[string]interface{}{
-			"Output": string(f2),
+		_ = tmpl.ExecuteTemplate(w, "process.html", map[string]interface{}{
+			"Output": output,
 		})
 	})
 
 	http.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		tmpl.ExecuteTemplate(w, "start.html", map[string]interface{}{
+		_ = tmpl.ExecuteTemplate(w, "start.html", map[string]interface{}{
 			"Resources": []string{},
 		})
 	})
 
-	http.ListenAndServe("localhost:8080", http.DefaultServeMux)
+	_ = http.ListenAndServe("localhost:8080", http.DefaultServeMux)
 }
