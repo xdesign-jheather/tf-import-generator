@@ -50,6 +50,12 @@ func (i Instance) Import(resourceType string) string {
 	attributes := i["attributes"].(map[string]interface{})
 
 	switch resourceType {
+	case "time_rotating":
+		return fmt.Sprintf(
+			"%s,%s",
+			attributes["rfc3339"].(string),
+			attributes["rotation_rfc3339"].(string),
+		)
 	case "aws_cloudwatch_event_target":
 		return fmt.Sprintf(
 			"%s/%s/%s",
