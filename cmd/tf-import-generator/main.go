@@ -86,11 +86,13 @@ func main() {
 			return
 		}
 
-		cmd := exec.Command("terraform", "fmt", f1.Name())
+		if tf, err := exec.LookPath("terraform"); err == nil {
+			cmd := exec.Command(tf, "fmt", f1.Name())
 
-		if err = cmd.Run(); err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
+			if err = cmd.Run(); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
 		}
 
 		f2, err := os.ReadFile(f1.Name())
